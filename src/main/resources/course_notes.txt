@@ -1,0 +1,385 @@
+=> Java allows both trusted and untrusted code execution.
+
+=> VALIDATION & SANITIZATION
+
+  The order of operations is important:
+  input -> canonicalize & normalize -> sanitize -> validate -> core of trusted component -> output sanitization -> output
+
+  Canonicalization: Lossless representation of the input data.
+  Normalization: Lossy representation of the input data.
+
+  Non-compliant code:
+  String path = file.getAbsolutePath();
+
+  Compliant code:
+  String path = file.getCanonicalPath();
+
+   Accepting input in the form of "../" without appropriate validation can allow an attacker to traverse the file system to access an arbitrary file.
+   Canonicalize path names before validating them: File.getCanonicalPath()
+
+=> PRIMITIVES & WRAPPERS
+  boolean, byte, char, short, int, float, double, long
+  Boolean, Byte, Character, Short, Integer, Float, Double, Long
+
+  Boolean and Byte are fully memoized in JVM. (Defined in JLS)
+
+  Always cast primitive expression to desired primitive numeric type when target wrapper type is non-specific.
+
+  Java's integral types and their operations are defined to perform signed modular arithmetic.
+
+  Detect or Prevent Overflow
+    Java 8 introduced Math.*exact() methods. They either return a mathematically correct value or throw ArithmeticException.
+
+  The only unsigned integral type in Java is char.
+  It's intended for holding 16-bit characters, not for arithmetic.
+  Performing arithmetic on char is strongly discouraged.
+
+  Denormalized Numbers:
+  float x = 1/3.0f; // 0.3333
+  x = x * 7e-45f;   // 2.8e-45
+  x = x / 7e-45f;   // 0.4
+
+  Do not use denormalized numbers. A method to detect denormalized numbers:
+
+  strictfp
+  public static boolean isDenormalized(float val){
+    if(val == 0){
+      return false;
+    }
+
+    if((val > -Float.MIN_NORMAL) && val < Float.MIN_NORMAL)){
+      return true;
+    }
+
+    return false;
+  }
+
+  A typical code pattern that can block further processing of unexpected floating point numbers is shown in the following example snippet.
+
+  if (Double.isNaN(untrusted_double_value)) {
+      // specific action for non-number case
+  }
+  if (Double.isInfinite(untrusted_double_value)){
+      // specific action for infinite case
+  }
+  // normal processing starts here
+
+=> CLONING
+
+  Cloning is another way to create objects without executing a constructor.
+  This bypasses any security checks in the constructor.
+  Make sensitive classes non-cloneable.
+  - Provide a clone() method that throws CloneNotSupportedException or a final clone() method.
+  - Sensitive class can be declared as final
+
+  Failing to call super.clone() may cause a cloned object to having the wrong type.
+
+=> SERIALIZATION & DESERIALIZATION
+  The file path in class Ser is not serialized with the rest of the class, and is consequently not exposed to attackers.
+
+  final class Ser implements Serializable {
+    transient File f;
+    public Ser() throws FileNotFoundException {
+      f = new File("c:\\filepath\\filename");
+    }
+  }
+
+  Deserialization builds new objects similar to constructors do, but without invoking constructors.
+  Serialization skips static or transient fields.
+  Do not serialize direct handles to system resources such as files.
+  Do not use reflection to increase accessibility of classes, methods or fields.
+
+  Once an object has been serialized, the Java language's access controls can no longer be enforced and
+  attackers can access private fields in an object by analyzing its serialized byte stream.
+  Therefore, do not serialize sensitive data in a serializable class.
+
+  Duplicate the SecurityManager checks enforced in a class during serialization and deserialization.
+  Prevent an attacker from using serialization or deserialization to bypass the SecurityManager checks enforced in a class.
+  Specifically, if a serializable class enforces a SecurityManager check in its constructors,
+  then enforce that same check in a readObject or readObjectNoData method implementation.
+  Otherwise, an instance of the class can be created without any check via deserialization.
+
+  public final class SensitiveClass implements java.io.Serializable
+  {
+    public SensitiveClass() {
+        securityManagerCheck();
+    }
+
+    private void readObject(java.io.ObjectInputStream in) {
+        securityManagerCheck();
+    }
+  }
+
+=> I/O & RESOURCES
+  Java 7 - try-with-resources (NIO interface)
+  Works on all resources that implement Closeable, AutoCloseable interfaces, including IO streams, sockets, channels etc.
+
+  Some decorators of resources may themselves be resources that require the correct release.
+  For instance, in the current Oracle JDK implementation compression-related streams are natively implemented using the C-heap for buffer storage.
+  Care must be taken that both resources are released in all circumstances.
+
+  public void bufferedWriteGzipFile(OutputStreamHandler handler) throws IOException {
+    try (
+        final OutputStream rawOut = Files.newOutputStream(path);
+        final OutputStream compressedOut = new GzipOutputStream(rawOut);
+    ) {
+        final BufferedOutputStream out = new BufferedOutputStream(compressedOut);
+        handler.handle(out);
+        out.flush();
+    }
+  }
+
+  Predefined text streams in Java:
+  - System.in  -> standard input (InputStream object)
+  - System.out -> standard output (PrintStream object)
+  - System.err -> standard error (PrintStream object)
+
+  Capturing multiple streams: redirect standard error to standard output, capture the standard output.
+
+  Time of check, time of use (TOCTOU) race conditions occur during file IO. (TOCTOU race window)
+  Preventing TOCTOU race windows isn't possible because Java doesn't provide any mechanisms to prevent tampering with a file during its race window.
+  But detecting some tampering is possible.
+
+  TOCTOU detect: check-use-check
+    BasicFileAttributes attr = ...
+    Object fileKey = attr.fileKey();
+    // use the file ...
+    // get the file key again and compare it with the 1st file key.
+
+  Buffers:
+    The new I/O (NIO) classes in java.nio allow the creation and use of direct buffers.
+    These buffers tremendously increase throughput for repeated I/O activities.
+    However, their creation and reclamation is more expensive than the creation and reclamation of
+    heap-based non-direct buffers because direct buffers are managed using OS-specific native code.
+    This added management cost makes direct buffers a poor choice for single-use or infrequently used cases.
+    Direct buffers are also outside the scope of Java’s garbage collector; consequently, injudicious use of direct buffers can cause memory leaks.
+    Finally, frequent allocation of large direct buffers can cause an OutOfMemoryError.
+
+    Noncompliant Code Example:
+      ByteBuffer rarelyUsedBuffer = ByteBuffer.allocateDirect(8192);
+      ByteBuffer heavilyUsedBuffer = ByteBuffer.allocateDirect(8192);
+
+    Compliant Solution
+      ByteBuffer rarelyUsedBuffer = ByteBuffer.allocate(8192);
+      ByteBuffer heavilyUsedBuffer = ByteBuffer.allocateDirect(8192);
+
+    In general, direct buffers should be allocated only when their use provides a significant gain in performance.
+
+=> SYNCHRONIZATION
+  The Java Memory Model defines a partial ordering called happens-before between all actions in a running program.
+  No happens-before relationship? Then the JVM, compiler and JIT are free to reorder the actions.
+
+  Declaring a variable volatile ensures that all threads see the most up-to-date value of the variable if any thread modifies it.
+  Volatile field rule: A write to a volatile field happens-before every subsequent read of that same field.
+  The finalizer rule: The end of a constructor for an object happens-before the start of the finalizer for that object.
+
+  Java's memory model and JVMs guarantee sequential consistency for correctly synchronized programs.
+
+  CopyOnWriteArrayList:
+  - thread-safe, in java.util.concurrent package
+  - optimized for case of reads hugely outnumbering writes.
+  - a good choice even for single-threaded applications.
+
+  To protect a static field, use a static lock. Not an instance lock!
+  Do not synchronize objects that may be reused.
+  Use the private final Object locking pattern.
+
+  The Executor framework provides a cleaner and more convenient interface compared to ThreadGroup methods.
+
+  Use of the volatile keyword can only guarantee safe publication of primitive fields, object references, or fields of immutable object referents.
+  A happens-before relationship exists between a thread that writes to a volatile variable and a thread that subsequently reads it.
+
+  Noncompliant Code Example (Mutable Sub-object)
+  In this noncompliant code example, the volatile format field stores a reference to a mutable object, java.text.DateFormat:
+
+  final class DateHandler {
+    private static volatile DateFormat format =
+      DateFormat.getDateInstance(DateFormat.MEDIUM);
+
+    public static java.util.Date parse(String str)
+        throws ParseException {
+      return format.parse(str);
+    }
+  }
+
+  Because DateFormat is not thread-safe, the value for Date returned by the parse() method may not correspond to the str argument.
+
+  Compliant Solution (Synchronization)
+  This compliant solution makes DateHandler thread-safe by synchronizing statements within the parse() method:
+
+  final class DateHandler {
+    private static DateFormat format =
+      DateFormat.getDateInstance(DateFormat.MEDIUM);
+
+    public static java.util.Date parse(String str)
+        throws ParseException {
+      synchronized (format) {
+        return format.parse(str);
+      }
+    }
+  }
+
+=> SecurityManager & AccessController
+  java.security.AccessController is the actual enforcer of Java's security model. java.lang.SecurityManager is an ambassador.
+  Most SecurityManager methods delegate their works to AccessController.
+
+  For a privileged operation to proceed, every method on the call stack must be allowed to do it.
+  AccessController.doPrivileged() executes a block of code with elevated privileges.
+
+  The security manager is closely tied to the AccessController class. The former is used as a hub for access control,
+  whereas the latter provides the actual implementation of the access control algorithm.
+
+  Non-compliant:(command line call)
+    java LocalJavaApp
+
+  Compliant:
+    java -Djava.security.manager=my.security.CustomManager -Djava.security.policy=policyURL LocalJavaApp
+
+  A SecurityManager can also be activated using the static System.setSecurityManager() method. Only one SecurityManager may be active at a time.
+
+  The standard security check ensures that each frame in the call stack has the required permission.
+  That is, the current permissions in force are the intersection of the permissions of each frame in the current access control context.
+  If any frame does not have a permission, no matter where it lies in the stack, then the current context does not have that permission.
+
+  Consider an application that indirectly uses secure operations through a library.
+
+  public class Library {
+    private static final String OPTIONS = "...";
+
+    public static String getOptions() {
+        return System.getProperty(OPTIONS);
+    }
+  }
+
+  class App {
+    public static void main(String[] args) {
+        System.out.println(
+            Library.getOptions()
+        );
+    }
+  }
+
+  When the permission check is performed, the call stack will be as illustrated below.
+
+  +--------------------------------+
+  | java.security.AccessController.checkPermission(Permission)
+  +--------------------------------+
+  | java.lang.SecurityManager.checkPermission(Permission)
+  +--------------------------------+
+  | java.lang.SecurityManager.checkPropertyAccess(String)
+  +--------------------------------+
+  | java.lang.System.getProperty(String)
+  +--------------------------------+
+  | Library.getOptions()
+  +--------------------------------+
+  | App.main(String[])
+
+
+  As permissions are restricted to the intersection of frames, an artificial AccessControlContext representing no (zero) frames implies all permissions.
+  The following three calls to doPrivileged are equivalent:
+
+      private static final AccessControlContext allPermissionsContext = new AccessControlContext(new java.security.ProtectionDomain[0]);
+
+      void someMethod(PrivilegedAction<Void> action) {
+          AccessController.doPrivileged(action, allPermissionsContext);
+          AccessController.doPrivileged(action, null);
+          AccessController.doPrivileged(action);
+      }
+
+=> FINALIZER ATTACK
+  From JDK6 on, an exception thrown before the java.lang.Object constructor exits which prevents the finalizer from being called.
+
+  To understand how an exception can be thrown before java.lang.Object is constructed, you need to understand the exact sequence of object creation.
+  The JLS spells out the sequence explicitly.
+
+  When an object is to be created, JVM:
+  1. Allocates space for the object.
+  2. Sets all the instance variables in the object to their default values. This includes the instance variables in the object's superclasses.
+  3. Assigns the parameter variables for the object.
+  4. Processes any explicit or implicit constructor invocation (a call to this() or super() in the constructor).
+  5. Initializes variables in the class.
+  6. Executes the rest of the constructor.
+
+  The key point is that the constructor's parameters are processed before any code inside the constructor is processed.
+  This means that if you do your validation while processing the parameters, you can prevent your objects from being finalized by throwing an exception.
+
+=> INHERITANCE
+
+  Understand how a superclass can affect subclass behavior:
+  The example that occurred in JDK 1.2:
+
+  Class Hierarchy                  Inherited Methods
+  -----------------------          --------------------------
+  java.util.Hashtable              put(key, val)
+          ^                        remove(key)
+          | extends
+          |
+  java.util.Properties
+          ^
+          | extends
+          |                        // SecurityManager checks for these methods
+  java.security.Provider           put(key, val)
+                                   remove(key)
+
+  The class java.security.Provider extends from java.util.Properties, and Properties extends from java.util.Hashtable.
+  In this hierarchy, the Provider class inherits certain methods from Hashtable, including put and remove.
+  Provider.put maps a cryptographic algorithm name, like RSA, to a class that implements that algorithm.
+  To prevent malicious code from affecting its internal mappings, Provider overrides put and remove to enforce the necessary SecurityManager checks.
+
+  The Hashtable class was enhanced in JDK 1.2 to include a new method, entrySet, which supports the removal of entries from the Hashtable.
+  The Provider class was not updated to override this new method.
+  This oversight allowed an attacker to bypass the SecurityManager check enforced in Provider.remove,
+  and to delete Provider mappings by simply invoking the Hashtable.entrySet method.
+
+  The primary flaw is that the data belonging to Provider (its mappings) is stored in the Hashtable class,
+  whereas the checks that guard the data are enforced in the Provider class.
+
+  This separation of data from its corresponding SecurityManager checks only exists because Provider extends from Hashtable.
+  Because a Provider is not inherently a Hashtable, it should not extend from Hashtable.
+  Instead, the Provider class should encapsulate a Hashtable instance allowing the data and the checks that guard that data to reside in the same class.
+
+=> OTHERS
+  Regex injection attack can be done with a search text like .*)|(.*
+  Secure solution to regex injection attack:
+  Filter out non-alphanumeric characters (except space and single quote) from the search string.
+
+  Do not modify the collection's elements during an enhanced for statement.
+  Declare the for loop variable as final:
+
+  Collection<Object> items = ...
+  for(final Object item : items){
+    ...
+  }
+
+  IdentityHashMap implements the Map interface with a hash-table, using reference-equality in place of object-equality when comparing keys (and values).
+  In other words, in an IdentityHashMap, two keys k1 and k2 are considered equal if and only if (k1==k2).
+  (In normal Map implementations (like HashMap ) two keys k1 and k2 are considered equal if and only if (k1==null ? k2==null : k1.equals(k2)))
+
+  Failure to reduce the scope of the @SuppressWarnings annotation can lead to runtime exceptions and break type-safety guarantees.
+
+  The java.security.SecureRandom class is widely used for generating cryptographically strong random numbers.
+  This non-compliant code example constructs a secure random number generator that is seeded with the specified seed bytes.
+  Using the current system time as the seed is predictable, and can result in the generation of random numbers with insufficient entropy.
+
+  Non-compliant:
+  SecureRandom random = new SecureRandom(String.valueOf(new Date().getTime()).getBytes());
+
+  Two classes are the same class if they are loaded by the same class loader and they have the same fully qualified class name.
+
+  Methods that perform a security check must be declared private or final.
+
+  Classes that define an equals() method , must also define hashcode() method.
+
+  Conditional Expression:
+  When the second and third operands of a conditional expression have different types, they can be subject to unexpected type conversions.
+
+  public class Expr {
+    public static void main(String[] args) {
+      char alpha = 'A';
+      int i = 0;
+      // Other code. Value of i may change
+      boolean trueExp = true; // Expression that evaluates to true
+      System.out.print(trueExp ? alpha : 0); // Prints A
+      System.out.print(trueExp ? alpha : i); // Prints 65
+    }
+  }
