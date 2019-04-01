@@ -1,2 +1,3 @@
-# cert-java
-My notes and some code examples related to CERT Secure Coding Rules and Guidelines in Java.
+## About this repository ##
+
+My notes and some code examples related to "CERT Secure Coding Rules and Guidelines in Java".
